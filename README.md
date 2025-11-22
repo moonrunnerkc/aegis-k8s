@@ -67,8 +67,6 @@ Build an offline AI SRE engine that practices inside a controlled Kubernetes sim
 
 ## 3. Repository Structure
 
-## Repository Structure
-
 ```plaintext
 aegis-k8s/
   backend/
@@ -268,10 +266,11 @@ Each plan is tested in three futures:
 Resilience leans toward the worst-case outcome.
 
 ### Propagation Decay Risk
-Risk accumulates across steps, exposing brittle multi-step plans.
+Risk builds from step to step, so the system can spot fragile plans.
+Past wrong diagnoses are remembered so they don’t get repeated.
 
 ### Diagnosis Echo Rejection
-Incorrect past diagnoses become forbidden hypotheses. Confidence is zeroed if they reappear.
+Past wrong diagnoses are remembered so they don’t get repeated.
 
 ### Hybrid Pareto Selection
 Plan selection considers:
@@ -358,7 +357,9 @@ These will be filled in during development.
 
 ## Status
 AEGIS-K8s is in design phase only.  
+This document describes the high-level design only and does not include implementation details or operational logic.
 All structures, directories, logic flows, and modes are defined.  
 Implementation will follow this layout exactly.
 
 ---
+
