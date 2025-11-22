@@ -1,8 +1,9 @@
 """
 Chaos event orchestration for the Aegis K8s simulator.
 
-Executes scheduled disruptions: pod crashes, node drains, traffic spikes, etc.
-Deterministic by design - no randomness, only scheduled mutations.
+This module runs all scheduled disruptions for the simulation tick loop.
+The focus is on predictable behavior, so there is no randomness here.
+Every effect is based on a predefined event list loaded from scenario YAML.
 """
 
 import logging
@@ -15,36 +16,32 @@ logger = logging.getLogger(__name__)
 
 class ChaosManager:
     """
-    Orchestrates chaos events based on a deterministic schedule.
+    Handles all chaos events for the simulator.
 
-    Responsibilities:
-    - Store event schedule loaded from scenario YAML
-    - Execute events at specified ticks
-    - Dispatch to appropriate handler methods
-    - Mutate cluster state clearly and deterministically
+    The idea is simple:
+    - We load an event schedule from scenario YAML.
+    - Each tick asks this manager whether anything needs to fire.
+    - If a matching event exists, we call the right handler and mutate state.
 
-    Does NOT:
-    - Introduce randomness
-    - Modify workloads or HPAs (engine handles that)
-    - Create or destroy entities (only mutates existing state)
+    What this system does:
+    - Runs before every other phase in the tick loop.
+    - Adjusts pods, nodes, or policies in controlled ways.
+    - Keeps things deterministic so shadow simulations behave the same way.
 
-    Integration with Simulation Tick Loop:
-    --------------------------------------
-    ChaosManager runs FIRST in each tick, before all other phases.
+    What it does not do:
+    - Add randomness.
+    - Create or remove cluster entities.
+    - Handle scaling, health checks, or scheduling logic. Those happen later.
 
-    Tick execution order (defined in engine.py):
-    1. Chaos events          ← ChaosManager.execute_events_for_tick()
-    2. Usage updates         (pods adjust resource consumption)
-    3. HPA evaluation        (replica scaling decisions)
-    4. Scheduling pass       (assign pending pods to nodes)
-    5. Health checks         (probe failures, restart logic)
+    Tick order (from engine.py):
+      1. Chaos events
+      2. Usage updates
+      3. HPA evaluation
+      4. Scheduler
+      5. Health checks
 
-    Why chaos runs first:
-    - Mutations (crashes, drains, spikes) happen before reactions
-    - HPA sees updated CPU/memory after traffic spikes
-    - Scheduler sees cordoned nodes immediately
-    - Health checks detect probe failures from netpol lockouts
-    - Ensures realistic cluster dynamics and causal ordering
+    We run first so that all other systems react to the updated conditions
+    rather than the other way around.
     """
 
     def __init__(
@@ -55,20 +52,20 @@ class ChaosManager:
         event_schedule: list[dict[str, Any]],
     ) -> None:
         """
-        Initialize chaos manager with cluster state and event schedule.
+        Store references to all cluster state plus the event schedule.
 
         Args:
-            nodes: Reference to cluster nodes list.
-            pods: Reference to cluster pods list.
-            network_policies: Reference to network policies list.
-            event_schedule: List of chaos events with 'tick' and 'type' fields.
+            nodes: List of node objects.
+            pods: List of pod objects.
+            network_policies: List of network policy objects.
+            event_schedule: List of events that include tick and type fields.
         """
         self.nodes = nodes
         self.pods = pods
         self.network_policies = network_policies
         self.event_schedule = event_schedule
 
-        # Event type → handler method mapping
+        # Map event types to handler functions
         self._event_handlers = {
             "pod_crash": self._handle_pod_crash,
             "node_cordon": self._handle_node_cordon,
@@ -81,23 +78,17 @@ class ChaosManager:
 
     def execute_events_for_tick(self, current_tick: int) -> list[dict[str, Any]]:
         """
-        Run all chaos events scheduled for this tick.
+        Execute every chaos event scheduled for this tick.
 
-        Called FIRST in each tick by the engine (before all other phases).
-        Finds events matching current_tick and dispatches them.
-
-        Execution guarantees:
-        - Runs before usage updates, HPA, scheduler, health checks
-        - Mutations visible to all subsequent phases in same tick
-        - Results returned for observability and debugging
+        We check the event list for entries whose tick matches the current one.
+        Each matching event is dispatched to its handler and the results are
+        returned for logging or UI updates.
 
         Args:
-            current_tick: Current simulation tick number.
+            current_tick: The tick number we are currently simulating.
 
         Returns:
-            List of dicts, each containing:
-                - event: The original event definition
-                - result: Handler execution result (status, details)
+            A list of dicts containing the event and the result of handling it.
         """
         executed_events: list[dict[str, Any]] = []
 
@@ -111,36 +102,27 @@ class ChaosManager:
 
         return executed_events
 
-    def _dispatch_event(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _dispatch_event(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Route event to the correct handler using internal mapping.
+        Given an event dict, route it to the correct handler.
 
-        Event dispatcher system maps event type → handler method.
-        No fallback behavior. Unknown event types are logged and rejected.
-
-        Supported event types:
-        - pod_crash: Crash a pod and increment restart count
-        - node_cordon: Prevent new pod assignments
-        - node_drain: Cordon node (blocks scheduling)
-        - burst_traffic: Spike CPU usage on pods
-        - oom_storm: Spike memory usage, crash if limit exceeded
-        - netpol_lockout: Enable network policy enforcement
-        - probe_failure: Fail liveness/readiness probe
+        The event must specify a type that matches our handler table.
+        If the type is missing or invalid, we log the error and return a
+        failure result so the caller can surface it.
 
         Args:
-            event: Event dict with 'type' field and handler-specific params.
+            event: A dict containing at least a 'type' field.
 
         Returns:
-            Result dict from the handler method, or error dict if type unknown.
+            Dict containing status and handler output.
         """
         event_type = event.get("type", "")
-
         handler = self._event_handlers.get(event_type)
 
         if handler is None:
             error_msg = (
-                f"Unknown chaos event type: '{event_type}'. "
-                f"Supported types: {list(self._event_handlers.keys())}"
+                f"Unknown chaos event type '{event_type}'. "
+                f"Supported types are {list(self._event_handlers.keys())}"
             )
             logger.error(error_msg)
             return {
@@ -151,15 +133,15 @@ class ChaosManager:
 
         return handler(event)
 
-    def _handle_pod_crash(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_pod_crash(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Crash a specific pod: transition to crash_loop, increment restart count.
+        Simulate a pod crash. Puts the pod into crash_loop and increments restarts.
 
-        Event params:
-            - pod_id: Target pod identifier
+        Args:
+            event: Should contain 'pod_id'.
 
         Returns:
-            Result dict with status and details.
+            Dict with updated pod status or failure reason.
         """
         pod_id = event.get("pod_id")
         pod = self._find_pod_by_id(pod_id)
@@ -176,15 +158,15 @@ class ChaosManager:
             "restart_count": pod.restart_count,
         }
 
-    def _handle_node_cordon(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_node_cordon(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Cordon a node: prevent new pod assignments.
+        Mark a node as cordoned so the scheduler will not place new pods on it.
 
-        Event params:
-            - node_id: Target node identifier
+        Args:
+            event: Should contain 'node_id'.
 
         Returns:
-            Result dict with status and details.
+            Dict confirming new cordoned state.
         """
         node_id = event.get("node_id")
         node = self._find_node_by_id(node_id)
@@ -200,18 +182,18 @@ class ChaosManager:
             "cordoned": node.cordoned,
         }
 
-    def _handle_node_drain(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_node_drain(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Drain a node: cordon it to block new pod assignments.
+        Drain a node by marking it cordoned.
 
-        Pure scheduling-blocker event. Does NOT evict pods or alter pod state.
-        Scheduler will simply skip this node when placing new pods.
+        This does not remove pods or change their state. The scheduler will
+        simply ignore this node for new placements.
 
-        Event params:
-            - node_id: Target node identifier
+        Args:
+            event: Should contain 'node_id'.
 
         Returns:
-            Result dict with status.
+            Dict indicating completion.
         """
         node_id = event.get("node_id")
         node = self._find_node_by_id(node_id)
@@ -227,20 +209,15 @@ class ChaosManager:
             "cordoned": True,
         }
 
-    def _handle_burst_traffic(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_burst_traffic(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Simulate CPU load spike from traffic burst.
+        Increase CPU usage on specific pods to simulate a traffic spike.
 
-        Increases simulated CPU usage on targeted pods. Leaves pod phase unchanged.
-        Updates node CPU tracking. HPA will react in Step 5 (engine handles that).
-        Deterministic for shadow simulations.
-
-        Event params:
-            - pod_ids: List of target pod identifiers
-            - cpu_increase: Amount to add to current CPU usage (cores)
+        Args:
+            event: Expects 'pod_ids' and 'cpu_increase'.
 
         Returns:
-            Result dict with affected pods and new CPU values.
+            Dict listing affected pods and their updated CPU usage.
         """
         pod_ids = event.get("pod_ids", [])
         cpu_increase = event.get("cpu_increase", 0.0)
@@ -257,7 +234,6 @@ class ChaosManager:
                 pod.simulated_cpu_usage + cpu_increase, pod.cpu_limit
             )
 
-            # Update node CPU tracking if pod is assigned
             if pod.assigned_node:
                 node = self._find_node_by_id(pod.assigned_node)
                 if node:
@@ -276,19 +252,15 @@ class ChaosManager:
             "affected_pods": affected_pods,
         }
 
-    def _handle_oom_storm(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_oom_storm(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Simulate memory pressure causing pods to exceed limits (OOM storm).
+        Increase memory usage on some pods. If the limit is exceeded, the pod crashes.
 
-        Raises memory usage sharply. If memory exceeds pod limit, crashes the pod.
-        Updates node memory tracking to reflect the increase.
-
-        Event params:
-            - pod_ids: List of target pod identifiers
-            - memory_increase: Amount to add to current memory usage (bytes)
+        Args:
+            event: Needs 'pod_ids' and 'memory_increase'.
 
         Returns:
-            Result dict with affected pods and crash details.
+            Dict describing each pod's updated memory state and crash result.
         """
         pod_ids = event.get("pod_ids", [])
         memory_increase = event.get("memory_increase", 0)
@@ -303,14 +275,12 @@ class ChaosManager:
             old_mem = pod.simulated_mem_usage
             pod.simulated_mem_usage += memory_increase
 
-            # Check if pod exceeded its memory limit
             crashed = False
             if pod.simulated_mem_usage > pod.mem_limit:
                 pod.phase = "crash_loop"
                 pod.restart_count += 1
                 crashed = True
 
-            # Update node memory tracking if pod is assigned
             if pod.assigned_node:
                 node = self._find_node_by_id(pod.assigned_node)
                 if node:
@@ -331,19 +301,15 @@ class ChaosManager:
             "affected_pods": affected_pods,
         }
 
-    def _handle_netpol_lockout(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_netpol_lockout(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Simulate NetworkPolicy suddenly blocking traffic.
+        Enable enforcement on a network policy, simulating a sudden lockout.
 
-        Sets policy enforced field to True. Does not directly mutate pods.
-        Communication failures will later manifest as probe failures or restarts
-        (indirect effect). Deterministic behavior guaranteed.
-
-        Event params:
-            - policy_id: Target network policy identifier
+        Args:
+            event: Should provide 'policy_id'.
 
         Returns:
-            Result dict with new enforcement state.
+            New enforcement status.
         """
         policy_id = event.get("policy_id")
         policy = self._find_network_policy_by_id(policy_id)
@@ -359,18 +325,15 @@ class ChaosManager:
             "enforced": True,
         }
 
-    def _handle_probe_failure(self, event: dict[str, Any]) -> dict[str, Any]:
+    def _handle_probe_failure(self, event: dict[str, Any]) -> dict[str, Any]]:
         """
-        Simulate liveness or readiness probe failing.
+        Force a pod's probe to fail. Pod enters crash_loop and restarts increase.
 
-        Sets last_probe_success to False, moves pod into crash-loop state,
-        and increments restart counter. Does not modify node or HPA state.
-
-        Event params:
-            - pod_id: Target pod identifier
+        Args:
+            event: Needs 'pod_id'.
 
         Returns:
-            Result dict with new pod state.
+            Updated pod state.
         """
         pod_id = event.get("pod_id")
         pod = self._find_pod_by_id(pod_id)
@@ -391,7 +354,7 @@ class ChaosManager:
         }
 
     def _find_pod_by_id(self, pod_id: str | None) -> Pod | None:
-        """Find pod by ID, return None if not found."""
+        """Simple lookup helper for pods."""
         if pod_id is None:
             return None
         for pod in self.pods:
@@ -400,7 +363,7 @@ class ChaosManager:
         return None
 
     def _find_node_by_id(self, node_id: str | None) -> Node | None:
-        """Find node by ID, return None if not found."""
+        """Simple lookup helper for nodes."""
         if node_id is None:
             return None
         for node in self.nodes:
@@ -411,7 +374,7 @@ class ChaosManager:
     def _find_network_policy_by_id(
         self, policy_id: str | None
     ) -> NetworkPolicy | None:
-        """Find network policy by ID, return None if not found."""
+        """Simple lookup helper for network policies."""
         if policy_id is None:
             return None
         for policy in self.network_policies:
