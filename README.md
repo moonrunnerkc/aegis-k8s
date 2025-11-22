@@ -329,20 +329,7 @@ Optional mode that evolves numeric parameters across generations.
 
 ---
 
-## 9. Build Guide (High-Level Summary)
-
-### Tier 1: Weeks 1–4
-Simulator → SentinelGraph skeleton → memory and echo rejection → propagation risk → Excalibur logic → frontend basics → smoke suite.
-
-### Tier 2: Weeks 5–6
-LegionGraph → critic → debate rounds → UI enhancements → more scenarios.
-
-### Tier 3: Weeks 7–9 (Optional)
-Evolution runner → genome design → evolution UI → controlled experiments.
-
----
-
-## 10. Documentation Set
+## 9. Documentation Set
 The `docs/` directory includes:
 - Simulator design  
 - Tier 1–3 docs  
@@ -362,4 +349,5 @@ All structures, directories, logic flows, and modes are defined.
 Implementation will follow this layout exactly.
 
 ---
+
 
